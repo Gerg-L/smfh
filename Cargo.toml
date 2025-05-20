@@ -18,3 +18,21 @@ strip = true
 opt-level = 3
 lto = "fat"
 codegen-units = 1 
+
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+arbitrary_source_item_ordering    = "allow"
+expect_used                       = "allow"
+implicit_return                   = "allow"
+missing_docs_in_private_items     = "allow"
+missing_trait_methods             = "allow"
+panic                             = "allow"
+panic_in_result_fn                = "allow"
+question_mark_used                = "allow"
+ref_patterns                      = "allow"
+unwrap_in_result                  = "allow"
+unwrap_used                       = "allow"
+wildcard_enum_match_arm           = "allow"
