@@ -8,8 +8,14 @@ use crate::{
 use color_eyre::{
     Result,
     eyre::{
-        Context,
-        OptionExt,
+        Context as _,
+        OptionExt as _,
+    },
+};
+use core::{
+    cmp::Ordering,
+    fmt::{
+        self,
     },
 };
 use log::{
@@ -21,13 +27,10 @@ use serde::{
     Deserialize,
     Deserializer,
     Serialize,
+    de::Error as serdeErr,
 };
 use serde_json::Value;
 use std::{
-    cmp::Ordering,
-    fmt::{
-        self,
-    },
     fs::{
         self,
     },
@@ -53,7 +56,7 @@ fn deserialize_octal<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Optio
         // Don't error here because it's null!
         return Ok(None);
     };
-    let x = u32::from_str_radix(&value, 8).map_err(serde::de::Error::custom)?;
+    let x = u32::from_str_radix(&value, 8).map_err(serdeErr::custom)?;
     Ok(Some(x))
 }
 
@@ -73,8 +76,8 @@ pub struct File {
 
 impl Ord for File {
     fn cmp(&self, other: &Self) -> Ordering {
-        fn value(f: &File) -> u8 {
-            match f.kind {
+        const fn value(file: &File) -> u8 {
+            match file.kind {
                 FileKind::Directory => 1,
                 FileKind::Copy => 2,
                 FileKind::Symlink => 3,
@@ -84,8 +87,8 @@ impl Ord for File {
         }
 
         if other.kind == self.kind {
-            fn parents(p: &Path) -> usize {
-                p.ancestors().count()
+            fn parents(path: &Path) -> usize {
+                path.ancestors().count()
             }
             parents(&self.target).cmp(&parents(&other.target))
         } else {
@@ -111,20 +114,20 @@ pub enum FileKind {
 }
 impl fmt::Display for FileKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let name = match self {
-            FileKind::Directory => "directory",
-            FileKind::Copy => "copy",
-            FileKind::Symlink => "symlink",
-            FileKind::Modify => "modify",
-            FileKind::Delete => "delete",
+        let name = match *self {
+            Self::Copy => "copy",
+            Self::Delete => "delete",
+            Self::Directory => "directory",
+            Self::Modify => "modify",
+            Self::Symlink => "symlink",
         };
         write!(f, "{name}")
     }
 }
 
 impl Manifest {
-    pub fn read(manifest_path: &Path) -> Manifest {
-        let mut manifest = (move || -> Result<Manifest> {
+    pub fn read(manifest_path: &Path) -> Self {
+        let mut manifest = (move || -> Result<Self> {
             let file = fs::File::open(manifest_path).context("Failed to open manifest")?;
             let root: Value = serde_json::from_reader(BufReader::new(&file))
                 .context("Failed to deserialize manifest")?;
@@ -133,53 +136,49 @@ impl Manifest {
                 .ok_or_eyre("Failed to get version from manifest")?;
 
             if version != VERSION {
-                error!(
-                    "Program version: '{}' Manifest version: '{}'\n Version mismatch, exiting!",
-                    VERSION, version
-                );
+                error!("Program version: '{VERSION}' Manifest version: '{version}'\n Version mismatch, exiting!");
                 process::exit(2)
-            };
+            }
 
-            let deserialized_manifest: Manifest =
+            let deserialized_manifest: Self =
                 serde_json::from_value(root).context("Failed to deserialize manifest")?;
 
             info!("Deserialized manifest: '{}'", manifest_path.display());
             Ok(deserialized_manifest)
         })()
-        .unwrap_or_else(|e| {
-            error!("{}", e);
+        .unwrap_or_else(|err| {
+            error!("{err}");
             process::exit(3)
         });
 
         if !cfg!(debug_assertions) {
-            manifest.files.retain(|f| {
-                let absolute = f.target.is_absolute()
-                    && !f.target.components().any(|x| x == Component::ParentDir)
-                    && f.source.as_ref().is_none_or(|x| x.is_absolute());
+            manifest.files.retain(|file| {
+                let absolute = file.target.is_absolute()
+                    && !file.target.components().any(|x| x == Component::ParentDir)
+                    && file.source.as_ref().is_none_or(|x| x.is_absolute());
                 if !absolute {
                     warn!(
                         "{} with target '{}' is not absolute, ignoring.",
-                        f.kind,
-                        f.target.display()
+                        file.kind,
+                        file.target.display()
                     );
-                };
+                }
                 absolute
             });
         }
 
         manifest
     }
-
     pub fn activate(&mut self, prefix: &str) {
         self.files.sort();
         for mut file in self.files.iter().map(FileWithMetadata::from) {
-            let _ = file
+            _ = file
                 .activate(self.clobber_by_default, prefix)
-                .inspect_err(|e| {
+                .inspect_err(|err| {
                     error!(
                         "Failed to activate file: '{}'\n Reason: '{}'",
                         file.target.display(),
-                        e
+                        err
                     );
                 });
         }
@@ -188,11 +187,11 @@ impl Manifest {
     pub fn deactivate(&mut self) {
         self.files.sort();
         for mut file in self.files.iter().map(FileWithMetadata::from).rev() {
-            let _ = file.deactivate().inspect_err(|e| {
+            _ = file.deactivate().inspect_err(|err| {
                 error!(
                     "Failed to deactivate file: '{}'\n Reason: '{}'",
                     file.target.display(),
-                    e
+                    err
                 );
             });
         }
@@ -202,26 +201,22 @@ impl Manifest {
         let mut updated_files: Vec<(File, File)> = vec![];
         let mut same_files: Vec<File> = vec![];
 
-        old_manifest.files.retain(|f| {
-            let mut keep = true;
-
-            if let Some(index) = self.files.iter().position(|inner| inner == f) {
+        old_manifest.files.retain(|file| {
+            if let Some(index) = self.files.iter().position(|inner| inner == file) {
                 same_files.push(self.files.swap_remove(index));
-
-                keep = !keep;
+                false
             } else if let Some(index) = self.files.iter().position(|inner| {
-                matches!(inner, File {
+                matches!(inner.clone(), File {
                     kind: FileKind::Symlink | FileKind::Copy,
-                    target,
+                   target,
                     ..
-                } if target == &f.target)
+                } if (target == file.target))
             }) {
-                updated_files.push((f.clone(), self.files.swap_remove(index)));
-
-                keep = !keep;
+                updated_files.push((file.clone(), self.files.swap_remove(index)));
+                false
+            } else {
+                true
             }
-
-            keep
         });
 
         // Remove files in old manifest
@@ -230,21 +225,21 @@ impl Manifest {
 
         for (old, new) in updated_files {
             if !old.clobber.unwrap_or(old_manifest.clobber_by_default) {
-                let mut f = FileWithMetadata::from(&old);
+                let mut file = FileWithMetadata::from(&old);
 
                 // Don't care if this errors
                 // metadata will just be none
-                let _ = f.set_metadata();
+                _ = file.set_metadata();
 
-                if f.metadata.is_some()
-                    && !f
+                if file.metadata.is_some()
+                    && !file
                         .check()
-                        .inspect_err(|e| warn!("Failed to check file: '{}', assuming file is incorrect\nReason: {}", f.target.display(), e))
+                        .inspect_err(|err| warn!("Failed to check file: '{}', assuming file is incorrect\nReason: {}", file.target.display(), err))
                         .unwrap_or(false)
                 {
-                 if let Err(e) = prefix_move(&f.target, prefix) {
-                     warn!("Failed to backup file '{}'\nReason: {}", f.target.display(), e);
-                 };
+                 if let Err(err) = prefix_move(&file.target, prefix) {
+                     warn!("Failed to backup file '{}'\nReason: {}", file.target.display(), err);
+                 }
                 // if file existed but was wrong,
                 // atomic action cannot be taken
                 // so there's no point of forcing clobber
@@ -257,16 +252,16 @@ impl Manifest {
 
             let atomic = FileWithMetadata::from(&new.clone())
                 .atomic_activate()
-                .inspect_err(|e| {
+                .inspect_err(|err| {
                     error!(
                         "Failed to (atomic) activate file: '{}'\n Reason: '{}'",
                         new.target.display(),
-                        e
+                        err
                     );
                 });
             if atomic.unwrap_or(false) {
                 self.files.push(new);
-            };
+            }
         }
 
         // These files could technically just be

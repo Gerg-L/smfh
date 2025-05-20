@@ -6,8 +6,8 @@ use blake3::Hash;
 use color_eyre::{
     Result,
     eyre::{
-        Context,
-        OptionExt,
+        Context as _,
+        OptionExt as _,
         eyre,
     },
 };
@@ -26,9 +26,10 @@ use std::{
         self,
         Metadata,
     },
+    io::ErrorKind,
     os::unix::fs::{
-        MetadataExt,
-        PermissionsExt,
+        MetadataExt as _,
+        PermissionsExt as _,
         chown,
         lchown,
         symlink,
@@ -53,17 +54,16 @@ pub struct FileWithMetadata {
 }
 
 impl From<&File> for FileWithMetadata {
-    fn from(f: &File) -> Self {
-        FileWithMetadata {
-            source: f.source.clone(),
-            target: f.target.clone(),
-            kind: f.kind,
-
-            clobber: f.clobber,
-            permissions: f.permissions,
-            uid: f.uid,
-            gid: f.gid,
-            deactivate: f.deactivate,
+    fn from(file: &File) -> Self {
+        Self {
+            source: file.source.clone(),
+            target: file.target.clone(),
+            kind: file.kind,
+            clobber: file.clobber,
+            permissions: file.permissions,
+            uid: file.uid,
+            gid: file.gid,
+            deactivate: file.deactivate,
             metadata: None,
         }
     }
@@ -80,25 +80,25 @@ impl FileWithMetadata {
 
         if clobber && self.metadata.is_some() && self.atomic_activate().context("(atomic)")? {
             return Ok(());
-        };
+        }
 
         if self.check().unwrap_or(false) {
             info!("File '{}' already correct", self.target.display());
             return Ok(());
         }
 
-        if match self {
-            FileWithMetadata { metadata: None, .. }
-            | FileWithMetadata {
+        if match *self {
+            Self { metadata: None, .. }
+            | Self {
                 kind: FileKind::Modify | FileKind::Delete,
                 ..
             } => false,
             // Don't clobber directories
             // If they're supposed to be
             // directories
-            FileWithMetadata {
+            Self {
                 kind: FileKind::Directory,
-                metadata: Some(metadata),
+                metadata: Some(ref metadata),
                 ..
             } => !metadata.is_dir(),
             _ => true,
@@ -131,7 +131,7 @@ impl FileWithMetadata {
                         && self.source.as_ref().unwrap().read_dir()?.next().is_some()
                 {
                     return Ok(false);
-                };
+                }
 
                 let target = self.target.clone();
 
@@ -192,12 +192,12 @@ impl FileWithMetadata {
 
     pub fn check(&self) -> Result<bool> {
         match *self {
-            FileWithMetadata {
+            Self {
                 metadata: None,
                 kind,
                 ..
             } => Ok(kind == FileKind::Delete),
-            FileWithMetadata {
+            Self {
                 metadata: Some(_),
                 kind: FileKind::Delete,
                 ..
@@ -205,13 +205,13 @@ impl FileWithMetadata {
             // This should never happen
             // as it's checked before this
             // function is ever called
-            FileWithMetadata {
+            Self {
                 source: None,
                 kind: FileKind::Symlink | FileKind::Copy,
                 ref target,
                 ..
             } => Err(eyre!("File '{}' missing_source", target.display())),
-            FileWithMetadata {
+            Self {
                 kind: FileKind::Copy | FileKind::Directory | FileKind::Modify,
                 permissions: Some(perms),
                 metadata: Some(ref metadata),
@@ -219,18 +219,18 @@ impl FileWithMetadata {
             }
 
             if perms != (metadata.mode() & 0o777) => Ok(false),
-            FileWithMetadata {
+            Self {
                 uid: Some(uid),
                 metadata: Some(ref metadata),
                 ..
             } if uid != metadata.uid() => Ok(false),
-            FileWithMetadata {
+            Self {
                 gid: Some(gid),
                 metadata: Some(ref metadata),
                 ..
             } if gid != metadata.gid() => Ok(false),
 
-            FileWithMetadata {
+            Self {
                 kind: FileKind::Symlink,
                 ref target,
                 source: Some(ref source),
@@ -241,17 +241,17 @@ impl FileWithMetadata {
                     // if source does not exist
                     // which should never happen
             } => Ok(fs::canonicalize(target)? == fs::canonicalize(source)?),
-            FileWithMetadata {
+            Self {
                 kind: FileKind::Directory,
                 metadata: Some(ref metadata),
                 ..
             } => Ok(metadata.is_dir()),
-            FileWithMetadata {
+            Self {
                 kind: FileKind::Copy,
             metadata: Some(ref metadata),
                 ..
             } if !metadata.is_file() => Ok(false),
-            FileWithMetadata {
+            Self {
                 kind: FileKind::Copy,
                 ref target,
                 source: Some(ref source),
@@ -259,14 +259,14 @@ impl FileWithMetadata {
             } => {
                 if fs::symlink_metadata(target)?.len() != fs::symlink_metadata(source)?.len() {
                     return Ok(false)
-                };
+                }
 
                 match (hash_file(target), hash_file(source)) {
-                        (Some(l), Some(r)) => Ok(l == r),
+                        (Some(left), Some(right)) => Ok(left == right),
                         _ => Ok(false)
                     }
             }
-            FileWithMetadata {
+            Self {
                 kind: FileKind::Modify,
                 ..
             } => Ok(true),
@@ -275,35 +275,35 @@ impl FileWithMetadata {
 
     pub fn set_metadata(&mut self) -> Result<()> {
         match fs::symlink_metadata(&self.target) {
-            Ok(x) => {
-                self.metadata = Some(x);
+            Ok(metadata) => {
+                self.metadata = Some(metadata);
                 Ok(())
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(err) if err.kind() == ErrorKind::NotFound => {
                 self.metadata = None;
                 Ok(())
             }
-            Err(e) => Err(e).context("while setting metadata"),
+            Err(err) => Err(err).context("while setting metadata"),
         }
     }
     pub fn check_source(&self) -> bool {
         match *self {
-            FileWithMetadata {
-                source: Some(ref s),
+            Self {
+                source: Some(ref metadata),
                 kind: FileKind::Copy | FileKind::Symlink,
                 ..
-            } if fs::symlink_metadata(s)
-                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            } if fs::symlink_metadata(metadata)
+                .is_err_and(|err| err.kind() == ErrorKind::NotFound) =>
             {
                 warn!(
                     "{} with target '{}' source '{}' does not exist",
                     self.kind,
                     self.target.display(),
-                    s.display()
+                    metadata.display()
                 );
                 true
             }
-            FileWithMetadata {
+            Self {
                 source: None,
                 kind: FileKind::Copy | FileKind::Symlink,
                 ..
@@ -315,16 +315,16 @@ impl FileWithMetadata {
                 );
                 true
             }
-            FileWithMetadata {
-                source: Some(ref s),
+            Self {
+                source: Some(ref source),
                 kind: FileKind::Copy,
                 ..
-            } if fs::symlink_metadata(s).is_ok_and(|x| !x.is_file()) => {
+            } if fs::symlink_metadata(source).is_ok_and(|x| !x.is_file()) => {
                 warn!(
                     "{} with target '{}' source '{}' is a directory, only files are permitted. Skipping...",
                     self.kind,
                     self.target.display(),
-                    s.display()
+                    source.display()
                 );
                 true
             }
@@ -348,7 +348,7 @@ impl FileWithMetadata {
 
                 if metadata.mode() & 0o777 == new_perms.mode() {
                     return Ok(());
-                };
+                }
                 info!(
                     "Setting permissions of: '{}' to: '{:o}'",
                     &self.target.display(),
@@ -372,20 +372,20 @@ impl FileWithMetadata {
                 self.target.display(),
                 metadata.uid(),
                 metadata.gid(),
-                self.uid.unwrap_or(metadata.uid()),
-                self.gid.unwrap_or(metadata.gid()),
+                self.uid.unwrap_or_else(|| metadata.uid()),
+                self.gid.unwrap_or_else(|| metadata.gid()),
             );
             if metadata.is_symlink() {
                 lchown(&self.target, self.uid, self.gid)?;
             } else {
                 chown(&self.target, self.uid, self.gid)?;
-            };
+            }
         }
         Ok(())
     }
 
     pub fn symlink(&mut self) -> Result<()> {
-        let _ = file_util::mkdir(
+        _ = file_util::mkdir(
             self.target
                 .parent()
                 .ok_or_eyre("Failed to get parent directory")?,
@@ -404,7 +404,7 @@ impl FileWithMetadata {
     }
 
     pub fn copy(&mut self) -> Result<()> {
-        let _ = file_util::mkdir(
+        _ = file_util::mkdir(
             self.target
                 .parent()
                 .ok_or_eyre("Failed to get parent directory")?,
@@ -438,10 +438,10 @@ pub fn mkdir(path: &Path) -> Result<()> {
         Ok(x) => {
             if !x.is_dir() {
                 return Err(eyre!("File in way of '{}'", path.display()));
-            };
+            }
             debug!("Directory '{}' already exists", path.display());
         }
-    };
+    }
     Ok(())
 }
 
@@ -465,7 +465,7 @@ pub fn prefix_move(path: &Path, prefix: &str) -> Result<()> {
 
     if let Ok(metadata) = fs::symlink_metadata(&new_path) {
         delete(&new_path, &metadata)?;
-    };
+    }
 
     fs::rename(canon_path, &new_path)?;
     info!("Renaming '{}' -> '{}'", path.display(), new_path.display());
@@ -475,14 +475,14 @@ pub fn prefix_move(path: &Path, prefix: &str) -> Result<()> {
 pub fn hash_file(filepath: &Path) -> Option<Hash> {
     let mut hasher = blake3::Hasher::new();
 
-    if let Err(e) = hasher.update_mmap(filepath) {
+    if let Err(err) = hasher.update_mmap(filepath) {
         warn!(
             "Failed to hash file: '{}'\nReason: '{}'",
             filepath.display(),
-            e
+            err
         );
         return None;
-    };
+    }
     Some(hasher.finalize())
 }
 

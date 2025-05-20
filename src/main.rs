@@ -5,7 +5,7 @@ use args::{
     Args,
     Subcommands,
 };
-use clap::Parser;
+use clap::Parser as _;
 use log::info;
 use manifest::Manifest;
 use simplelog::{
@@ -37,7 +37,7 @@ fn main() {
     )
     .expect("Failed to initialize logger");
 
-    info!("Program version: '{}'", VERSION);
+    info!("Program version: '{VERSION}'");
     match args.sub_command {
         Subcommands::Deactivate { manifest } => Manifest::read(&manifest).deactivate(),
         Subcommands::Activate { manifest, prefix } => Manifest::read(&manifest).activate(&prefix),
@@ -46,5 +46,5 @@ fn main() {
             manifest,
             old_manifest,
         } => Manifest::read(&manifest).diff(Manifest::read(&old_manifest), &prefix),
-    };
+    }
 }
